@@ -138,3 +138,55 @@ def delete_conversation(conversation_id: int):
     conn.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
     conn.commit()
     conn.close()
+
+def init_usage_table():
+    conn = get_connection()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS token_usage (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            username          TEXT NOT NULL,
+            conversation_id   INTEGER,
+            prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def log_token_usage(username, conversation_id, prompt_tokens, completion_tokens):
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO token_usage (username, conversation_id, prompt_tokens, completion_tokens) VALUES (?, ?, ?, ?)",
+        (username, conversation_id, prompt_tokens, completion_tokens)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_user_token_usage(username):
+    conn = get_connection()
+    row = conn.execute(
+        """SELECT COALESCE(SUM(prompt_tokens), 0),
+                  COALESCE(SUM(completion_tokens), 0),
+                  COUNT(*)
+           FROM token_usage WHERE username=?""",
+        (username,)
+    ).fetchone()
+    conn.close()
+    return {"prompt": row[0], "completion": row[1], "total": row[0] + row[1], "requests": row[2]}
+
+
+def get_all_users_usage():
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT username,
+                  COALESCE(SUM(prompt_tokens), 0),
+                  COALESCE(SUM(completion_tokens), 0),
+                  COUNT(*)
+           FROM token_usage GROUP BY username
+           ORDER BY SUM(prompt_tokens) + SUM(completion_tokens) DESC"""
+    ).fetchall()
+    conn.close()
+    return [{"username": r[0], "prompt": r[1], "completion": r[2], "total": r[1] + r[2], "requests": r[3]} for r in rows]

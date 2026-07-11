@@ -7,11 +7,13 @@ from database import (
     create_conversation, get_user_conversations,
     get_conversation_messages, save_message,
     clear_conversation, delete_conversation,
-    update_conversation_title
+    update_conversation_title,
+    init_usage_table, log_token_usage, get_user_token_usage, get_all_users_usage
 )
 
 load_dotenv()
 init_db()
+init_usage_table()
 
 VLLM_URL = os.getenv("VLLM_URL", "http://localhost:8000")
 MODEL    = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -141,22 +143,52 @@ def chat(message, history, system_prompt, temperature, max_tokens, conv_id, requ
         messages=messages,
         max_tokens=int(max_tokens),
         temperature=float(temperature),
-        stream=True
+        stream=True,
+        stream_options={"include_usage": True}
     )
 
     partial, tokens, start = "", 0, time.time()
+    usage = None
     for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            partial += delta
+        if chunk.usage:
+            usage = chunk.usage
+        if chunk.choices and chunk.choices[0].delta.content:
+            partial += chunk.choices[0].delta.content
             tokens += 1
             yield new_history + [{"role": "assistant", "content": partial}]
 
     save_message(username, conv_id, "assistant", partial)
 
+    if usage:
+        prompt_t, completion_t = usage.prompt_tokens, usage.completion_tokens
+    else:
+        prompt_t, completion_t = 0, tokens
+    log_token_usage(username, conv_id, prompt_t, completion_t)
+
     elapsed = time.time() - start
-    final = f"{partial}\n\n---\n*{elapsed:.1f}s | ~{tokens} tokens*"
+    final = (f"{partial}\n\n---\n"
+             f"*{elapsed:.1f}s | prompt: {prompt_t} | completion: {completion_t} tokens*")
     yield new_history + [{"role": "assistant", "content": final}]
+
+
+def get_my_usage(request: gr.Request):
+    u = get_user_token_usage(request.username)
+    return (f"### Moja potrosuvacka ({request.username})\n\n"
+            f"| | |\n|---|---|\n"
+            f"| Prompt tokens | {u['prompt']} |\n"
+            f"| Completion tokens | {u['completion']} |\n"
+            f"| **Vkupno** | **{u['total']}** |\n"
+            f"| Broj na prasanja | {u['requests']} |")
+
+
+def get_all_usage():
+    rows = get_all_users_usage()
+    if not rows:
+        return "Nema podatoci."
+    md = "### Site korisnici\n\n| Korisnik | Prompt | Completion | Vkupno | Prasanja |\n|---|---|---|---|---|\n"
+    for r in rows:
+        md += f"| {r['username']} | {r['prompt']} | {r['completion']} | {r['total']} | {r['requests']} |\n"
+    return md
 
 
 # Gradio UI
@@ -296,6 +328,15 @@ Content-Type: application/json
 **vLLM** serves the model via an OpenAI-compatible REST API.
 The **client** uses the OpenAI Python SDK pointed at the vLLM server instead of `api.openai.com`.
             """)
+
+        with gr.TabItem("Usage"):
+            my_usage = gr.Markdown()
+            gr.Button("Refresh").click(get_my_usage, outputs=my_usage)
+            gr.Markdown("---")
+            all_usage = gr.Markdown()
+            gr.Button("Refresh All").click(get_all_usage, outputs=all_usage)
+            demo.load(get_my_usage, outputs=my_usage)
+            demo.load(get_all_usage, outputs=all_usage)
 
     demo.load(
         load_initial_data,
