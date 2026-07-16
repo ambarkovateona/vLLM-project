@@ -26,6 +26,69 @@ PERSONAS = {
     "Creative Writer": ("You are a creative writer with vivid imagination. Write expressively.", 1.2),
 }
 
+CSS = """
+footer { display: none !important; }
+
+.chatbot-area ::-webkit-scrollbar { width: 0 !important; }
+.chatbot-area { scrollbar-width: none !important; }
+
+button.primary {
+    background: #000000 !important;
+    border-color: #000000 !important;
+    color: #ffffff !important;
+}
+button.primary:hover {
+    background: #222222 !important;
+    border-color: #222222 !important;
+}
+
+button.secondary {
+    border-color: #000000 !important;
+    color: #000000 !important;
+}
+button.secondary:hover { background: #f4f4f4 !important; }
+
+.delete-btn button {
+    background: #ffffff !important;
+    border: 1px solid #dc2626 !important;
+    color: #dc2626 !important;
+    border-radius: 6px !important;
+    font-size: 0.8rem !important;
+    width: 100% !important;
+}
+.delete-btn button:hover { background: #fef2f2 !important; }
+
+.selected-conv-label p {
+    font-size: 0.75rem !important;
+    padding: 2px 4px !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+}
+
+input[type="radio"]    { accent-color: #000000 !important; }
+input[type="range"]    { accent-color: #000000 !important; }
+input[type="checkbox"] { accent-color: #000000 !important; }
+
+.tabs button.selected,
+.tab-nav button.selected {
+    border-color: #000000 !important;
+    color: #000000 !important;
+}
+.tabs button:hover,
+.tab-nav button:hover { color: #000000 !important; }
+
+input:focus,
+textarea:focus,
+.block:focus-within,
+.wrap:focus-within {
+    border-color: #000000 !important;
+    box-shadow: 0 0 0 2px rgba(0,0,0,0.08) !important;
+}
+
+.accordion-header { color: #000000 !important; }
+"""
+
 
 def check_server():
     try:
@@ -50,47 +113,40 @@ def get_model_info():
         return "Could not fetch model info. Is the server running?"
 
 
-def export_chat(history):
-    if not history:
-        return None
-    lines = ["vLLM Chat Export", "=" * 40]
-    for msg in history:
-        role = "You" if msg["role"] == "user" else "Bot"
-        lines.append(f"\n{role}: {msg['content']}")
-    path = "/tmp/chat_export.txt"
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-    return path
-
-
 def build_choices(convs):
     choices = [c["title"] for c in convs]
     mapping = {c["title"]: c["id"] for c in convs}
     return choices, mapping
 
 
+def get_welcome(username):
+    hour = int(time.strftime("%H"))
+    greeting = "Good morning" if hour < 12 else ("Good afternoon" if hour < 18 else "Good evening")
+    return f"### {greeting}, {username}!\nHow can I help you today?"
+
+
 def load_initial_data(request: gr.Request):
     username = request.username
     convs = get_user_conversations(username)
-
     if not convs:
         create_conversation(username)
         convs = get_user_conversations(username)
-
     choices, mapping = build_choices(convs)
     selected = choices[0]
     conv_id  = mapping[selected]
     messages = get_conversation_messages(conv_id)
-
-    return gr.Radio(choices=choices, value=selected), messages, conv_id, mapping
+    welcome  = get_welcome(username) if not messages else ""
+    label    = f"Selected: **{selected}**"
+    return gr.Radio(choices=choices, value=selected), messages, conv_id, mapping, welcome, label
 
 
 def switch_conversation(selected_title, mapping):
     if not selected_title or not mapping:
-        return [], None
+        return [], None, ""
     conv_id  = mapping.get(selected_title)
     messages = get_conversation_messages(conv_id)
-    return messages, conv_id
+    label    = f"Selected: **{selected_title}**"
+    return messages, conv_id, label
 
 
 def new_chat(request: gr.Request):
@@ -100,7 +156,26 @@ def new_chat(request: gr.Request):
     choices, mapping = build_choices(convs)
     selected = choices[0]
     conv_id  = mapping[selected]
-    return gr.Radio(choices=choices, value=selected), [], conv_id, mapping
+    label    = f"Selected: **{selected}**"
+    return gr.Radio(choices=choices, value=selected), [], conv_id, mapping, get_welcome(username), label
+
+
+def delete_current_conv(conv_id, mapping, request: gr.Request):
+    if not conv_id:
+        return gr.Radio(), [], None, mapping, "", ""
+    username = request.username
+    delete_conversation(conv_id)
+    convs = get_user_conversations(username)
+    if not convs:
+        create_conversation(username)
+        convs = get_user_conversations(username)
+    choices, new_mapping = build_choices(convs)
+    selected    = choices[0]
+    new_conv_id = new_mapping[selected]
+    messages    = get_conversation_messages(new_conv_id)
+    welcome     = get_welcome(username) if not messages else ""
+    label       = f"Selected: **{selected}**"
+    return gr.Radio(choices=choices, value=selected), messages, new_conv_id, new_mapping, welcome, label
 
 
 def clear_current(conv_id):
@@ -110,18 +185,16 @@ def clear_current(conv_id):
 
 
 def refresh_conv_list(request: gr.Request, conv_id):
-    """Rebuild the sidebar list, keeping the current conversation selected."""
     username = request.username
     convs = get_user_conversations(username)
     choices, mapping = build_choices(convs)
     selected = next((c for c in choices if mapping[c] == conv_id), choices[0] if choices else None)
-    return gr.Radio(choices=choices, value=selected), mapping
+    label    = f"Selected: **{selected}**" if selected else ""
+    return gr.Radio(choices=choices, value=selected), mapping, label
 
 
 def chat(message, history, system_prompt, temperature, max_tokens, conv_id, request: gr.Request):
     username = request.username
-
-    # Auto-generate a title from the first user message in this conversation
     if not history:
         title = message[:40] + ("..." if len(message) > 40 else "")
         existing_titles = {c["title"] for c in get_user_conversations(username) if c["id"] != conv_id}
@@ -139,89 +212,71 @@ def chat(message, history, system_prompt, temperature, max_tokens, conv_id, requ
     new_history = list(history) + [{"role": "user", "content": message}]
 
     stream = client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        max_tokens=int(max_tokens),
-        temperature=float(temperature),
-        stream=True,
-        stream_options={"include_usage": True}
+        model=MODEL, messages=messages,
+        max_tokens=int(max_tokens), temperature=float(temperature),
+        stream=True, stream_options={"include_usage": True}
     )
 
-    partial, tokens, start = "", 0, time.time()
-    usage = None
+    partial, tokens, start, usage = "", 0, time.time(), None
     for chunk in stream:
         if chunk.usage:
             usage = chunk.usage
         if chunk.choices and chunk.choices[0].delta.content:
             partial += chunk.choices[0].delta.content
-            tokens += 1
+            tokens  += 1
             yield new_history + [{"role": "assistant", "content": partial}]
 
     save_message(username, conv_id, "assistant", partial)
-
-    if usage:
-        prompt_t, completion_t = usage.prompt_tokens, usage.completion_tokens
-    else:
-        prompt_t, completion_t = 0, tokens
+    prompt_t     = usage.prompt_tokens     if usage else 0
+    completion_t = usage.completion_tokens if usage else tokens
     log_token_usage(username, conv_id, prompt_t, completion_t)
 
     elapsed = time.time() - start
-    final = (f"{partial}\n\n---\n"
-             f"*{elapsed:.1f}s | prompt: {prompt_t} | completion: {completion_t} tokens*")
+    final = f"{partial}\n\n---\n*{elapsed:.1f}s | prompt: {prompt_t} | completion: {completion_t} tokens*"
     yield new_history + [{"role": "assistant", "content": final}]
 
 
 def get_my_usage(request: gr.Request):
     u = get_user_token_usage(request.username)
-    return (f"### Moja potrosuvacka ({request.username})\n\n"
+    return (f"### My Usage ({request.username})\n\n"
             f"| | |\n|---|---|\n"
             f"| Prompt tokens | {u['prompt']} |\n"
             f"| Completion tokens | {u['completion']} |\n"
-            f"| **Vkupno** | **{u['total']}** |\n"
-            f"| Broj na prasanja | {u['requests']} |")
+            f"| **Total** | **{u['total']}** |\n"
+            f"| Requests | {u['requests']} |")
 
 
-def get_all_usage():
-    rows = get_all_users_usage()
-    if not rows:
-        return "Nema podatoci."
-    md = "### Site korisnici\n\n| Korisnik | Prompt | Completion | Vkupno | Prasanja |\n|---|---|---|---|---|\n"
-    for r in rows:
-        md += f"| {r['username']} | {r['prompt']} | {r['completion']} | {r['total']} | {r['requests']} |\n"
-    return md
-
-
-# Gradio UI
-with gr.Blocks(title="vLLM Chat Demo") as demo:
+with gr.Blocks(title="Qwen Chat") as demo:
 
     conv_id_state  = gr.State(None)
     conv_map_state = gr.State({})
 
-    with gr.Row():
-        gr.Markdown("# vLLM Chat Demo")
-        gr.Button("Logout", size="sm").click(None, js="window.location.href='/logout'")
-    gr.Markdown(f"Small Language Model served via **vLLM 0.9.0** | Model: `{MODEL}`")
+    gr.Markdown("# Qwen Chat")
 
     with gr.Tabs():
 
         with gr.TabItem("Chat"):
             with gr.Row():
 
-                # Left sidebar — conversation list
                 with gr.Column(scale=1, min_width=180):
                     new_chat_btn = gr.Button("+ New Chat", variant="primary")
+                    gr.Markdown("---")
                     conv_radio   = gr.Radio(choices=[], label="Conversations", interactive=True)
+                    gr.Markdown("---")
+                    selected_label = gr.Markdown("", elem_classes="selected-conv-label")
+                    delete_btn     = gr.Button("Delete selected", size="sm", elem_classes="delete-btn")
+                    gr.Markdown("---")
+                    gr.Button("Log out", size="sm").click(None, js="window.location.href='/logout'")
 
-                # Main chat area
                 with gr.Column(scale=4):
                     with gr.Row():
                         status_box = gr.Textbox(
-                            value=check_server(),
-                            label="Server Status",
-                            interactive=False,
-                            scale=3
+                            value=check_server(), label="Server Status",
+                            interactive=False, scale=3
                         )
                         gr.Button("Refresh", scale=1).click(check_server, outputs=status_box)
+
+                    welcome_box = gr.Markdown("")
 
                     gr.Markdown("### Personas")
                     with gr.Row():
@@ -232,8 +287,7 @@ with gr.Blocks(title="vLLM Chat Demo") as demo:
                     with gr.Accordion("Parameters", open=False):
                         system_prompt = gr.Textbox(
                             value="You are a helpful assistant.",
-                            label="System Prompt",
-                            lines=2
+                            label="System Prompt", lines=2
                         )
                         with gr.Row():
                             temperature = gr.Slider(0.1, 1.5, value=0.7, step=0.1,
@@ -245,56 +299,48 @@ with gr.Blocks(title="vLLM Chat Demo") as demo:
                     msg_box = gr.Textbox(placeholder="Type your message...", label="Message")
 
                     with gr.Row():
-                        send_btn   = gr.Button("Send", variant="primary")
-                        clear_btn  = gr.Button("Clear")
-                        export_btn = gr.Button("Download Chat")
+                        send_btn  = gr.Button("Send", variant="primary")
+                        stop_btn  = gr.Button("Stop")
+                        clear_btn = gr.Button("Clear")
 
-                    export_file = gr.File(label="Chat Export", visible=False)
-
-            # Persona buttons
             btn_code.click(    lambda: PERSONAS["Code Assistant"],  outputs=[system_prompt, temperature])
             btn_teacher.click( lambda: PERSONAS["Teacher"],         outputs=[system_prompt, temperature])
             btn_creative.click(lambda: PERSONAS["Creative Writer"], outputs=[system_prompt, temperature])
 
-            # New conversation
-            new_chat_btn.click(
-                new_chat,
-                outputs=[conv_radio, chatbot, conv_id_state, conv_map_state]
-            )
+            new_chat_btn.click(new_chat,
+                outputs=[conv_radio, chatbot, conv_id_state, conv_map_state, welcome_box, selected_label])
 
-            # Switch conversation
-            conv_radio.change(
-                switch_conversation,
+            delete_btn.click(delete_current_conv,
+                inputs=[conv_id_state, conv_map_state],
+                outputs=[conv_radio, chatbot, conv_id_state, conv_map_state, welcome_box, selected_label])
+
+            conv_radio.change(switch_conversation,
                 inputs=[conv_radio, conv_map_state],
-                outputs=[chatbot, conv_id_state]
-            )
+                outputs=[chatbot, conv_id_state, selected_label])
 
-            # Send message — then refresh sidebar so the auto-title appears
-            send_btn.click(
+            # Store original streaming events separately so stop_btn can cancel them
+            chat_event = send_btn.click(
                 chat,
                 inputs=[msg_box, chatbot, system_prompt, temperature, max_tokens, conv_id_state],
                 outputs=chatbot
-            ).then(lambda: "", outputs=msg_box).then(
-                refresh_conv_list,
-                inputs=[conv_id_state],
-                outputs=[conv_radio, conv_map_state]
             )
+            chat_event.then(lambda: "", outputs=msg_box
+            ).then(lambda: "", outputs=welcome_box
+            ).then(refresh_conv_list, inputs=[conv_id_state],
+                   outputs=[conv_radio, conv_map_state, selected_label])
 
-            msg_box.submit(
+            submit_event = msg_box.submit(
                 chat,
                 inputs=[msg_box, chatbot, system_prompt, temperature, max_tokens, conv_id_state],
                 outputs=chatbot
-            ).then(lambda: "", outputs=msg_box).then(
-                refresh_conv_list,
-                inputs=[conv_id_state],
-                outputs=[conv_radio, conv_map_state]
             )
+            submit_event.then(lambda: "", outputs=msg_box
+            ).then(lambda: "", outputs=welcome_box
+            ).then(refresh_conv_list, inputs=[conv_id_state],
+                   outputs=[conv_radio, conv_map_state, selected_label])
 
+            stop_btn.click(fn=None, cancels=[chat_event, submit_event])
             clear_btn.click(clear_current, inputs=conv_id_state, outputs=chatbot)
-
-            export_btn.click(
-                export_chat, inputs=chatbot, outputs=export_file
-            ).then(lambda: gr.File(visible=True), outputs=export_file)
 
         with gr.TabItem("Model Info"):
             gr.Markdown("### Model Information")
@@ -309,22 +355,7 @@ with gr.Blocks(title="vLLM Chat Demo") as demo:
 | GET  | `/v1/models` | List available models |
 | GET  | `/health` | Check server status |
 
-### How to use the API directly
-
-```
-POST {VLLM_URL}/v1/chat/completions
-Content-Type: application/json
-
-{{
-  "model": "{MODEL}",
-  "messages": [{{"role": "user", "content": "Hello!"}}],
-  "temperature": 0.7,
-  "max_tokens": 512
-}}
-```
-
 ### Architecture
-
 **vLLM** serves the model via an OpenAI-compatible REST API.
 The **client** uses the OpenAI Python SDK pointed at the vLLM server instead of `api.openai.com`.
             """)
@@ -332,20 +363,15 @@ The **client** uses the OpenAI Python SDK pointed at the vLLM server instead of 
         with gr.TabItem("Usage"):
             my_usage = gr.Markdown()
             gr.Button("Refresh").click(get_my_usage, outputs=my_usage)
-            gr.Markdown("---")
-            all_usage = gr.Markdown()
-            gr.Button("Refresh All").click(get_all_usage, outputs=all_usage)
             demo.load(get_my_usage, outputs=my_usage)
-            demo.load(get_all_usage, outputs=all_usage)
 
-    demo.load(
-        load_initial_data,
-        outputs=[conv_radio, chatbot, conv_id_state, conv_map_state]
-    )
+    demo.load(load_initial_data,
+        outputs=[conv_radio, chatbot, conv_id_state, conv_map_state, welcome_box, selected_label])
 
 demo.launch(
     server_name="0.0.0.0",
     server_port=7860,
     auth=authenticate,
-    auth_message="Welcome to vLLM Chat Demo. Please log in."
+    auth_message="Welcome to Qwen Chat. Please log in.",
+    css=CSS
 )
